@@ -256,17 +256,19 @@ async function handleApi(
       .trim()
       .toLowerCase();
     const password = String(body.password || "");
+    const confirmPassword = String(body.confirm_password || "");
     if (
       !name ||
       !/^\S+@\S+\.\S+$/.test(email) ||
-      password.length < 10
+      password.length < 10 ||
+      password !== confirmPassword
     )
       return (
         json(
           res,
           {
             error:
-              "Name, valid email and a 10-character password are required.",
+              "Enter your name and a valid email, use a password of at least 10 characters, and make sure both passwords match.",
           },
           400,
         ),
@@ -288,7 +290,7 @@ async function handleApi(
         .prepare("SELECT id,name,email,phone,role FROM users WHERE id=?")
         .get(Number(result.lastInsertRowid)) as SessionUser;
       await logActivity(customer, "Created customer account", "Account", String(customer.id));
-      await login(req, res, customer);
+      json(res, { ok: true });
     } catch {
       json(res, { error: "That email address is already registered." }, 409);
     }
