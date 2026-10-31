@@ -32,13 +32,19 @@ function frame(content: string): string { return `${header()}${content}${footer(
 function page(title: string, subtitle: string, body: string): string { return frame(`<section class="page-head"><span>ESCAPE VILLA</span><h1>${title}</h1><p>${subtitle}</p></section><main class="container">${body}</main>`); }
 function serviceImage(service: Service): [string, string] {
   const name = service.name.toLowerCase();
-  if (name.includes('photo')) return ['/images/gallery/09-maternity-red.jpeg', 'Maternity photoshoot at Escape Villa'];
+  if (name.includes('photo')) return ['/images/gallery/13-graduation-photography.jpg', 'Graduation photography at Escape Villa'];
   if (name.includes('video')) return ['/images/gallery/05-portrait-session.jpeg', 'Creative portrait session'];
   if (name.includes('event')) return ['/images/gallery/08-event-table.jpeg', 'Event table styling'];
-  if (name.includes('makeup')) return ['/images/gallery/12-graduation-portrait.jpeg', 'Graduation makeup and portrait'];
-  return ['/images/gallery/11-dining-decoration.jpeg', 'Romantic private dinner table'];
+  if (name.includes('makeup')) return ['/images/gallery/14-makeup-glam.jpg', 'Glam makeup and beauty styling at Escape Villa'];
+  return ['/images/gallery/15-romantic-private-dinner.jpg', 'Couple enjoying a romantic private dinner at Escape Villa'];
 }
-function servicesMarkup(): string { return `<div class="cards">${services.map((service, index) => { const [image, alt] = serviceImage(service); return `<article class="card service-card"><img class="service-image" src="${image}" alt="${escapeHtml(alt)}" loading="lazy"><div class="number">0${index + 1}</div><h2>${escapeHtml(service.name)}</h2><p>${escapeHtml(service.description)}</p><a href="/book?service=${service.id}">Choose a package →</a></article>`; }).join('')}</div>`; }
+function serviceMediaMarkup(service: Service, booking = false): string {
+  const [image, alt] = serviceImage(service);
+  const className = booking ? 'booking-service-image' : 'service-image';
+  if (service.name.toLowerCase().includes('video')) return `<video class="${className}" controls playsinline preload="none" poster="${image}" aria-label="Videography sample video"><source src="/videos/videography-sample.mp4" type="video/mp4">Your browser does not support video playback.</video>`;
+  return `<img class="${className}" src="${image}" alt="${escapeHtml(alt)}" loading="lazy">`;
+}
+function servicesMarkup(): string { return `<div class="cards">${services.map((service, index) => `<article class="card service-card">${serviceMediaMarkup(service)}<div class="number">0${index + 1}</div><h2>${escapeHtml(service.name)}</h2><p>${escapeHtml(service.description)}</p><a href="/book?service=${service.id}">Choose a package →</a></article>`).join('')}</div>`; }
 function packagePriceLabel(pkg: Pick<Package, 'price' | 'price_from'>): string { return `${pkg.price_from ? 'From ' : ''}R ${pkg.price.toLocaleString('en-ZA')}`; }
 function packageDetailsMarkup(pkg: Package): string { return `<p class="package-price">${packagePriceLabel(pkg)}</p><ul class="package-inclusions">${pkg.description.split('|').map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ul>`; }
 function packagesMarkup(): string { return services.map((service) => { const choices = packages.filter((pkg) => pkg.service_id === service.id); return choices.length ? `<section class="package-group"><h2 class="serif">${escapeHtml(service.name)} packages</h2><div class="cards">${choices.map((pkg) => `<article class="card"><h3>${escapeHtml(pkg.name)}</h3>${packageDetailsMarkup(pkg)}<a href="/book?package=${pkg.id}">Book this package →</a></article>`).join('')}</div>${service.name === 'Event Planning' ? '<p class="muted">Venue hire, catering, décor rentals and supplier costs are quoted separately unless explicitly included in the agreed package.</p>' : ''}</section>` : ''; }).join(''); }
@@ -64,6 +70,9 @@ function renderGallery(): void {
     ['10-pool-event-setup.jpeg', 'Poolside event setup'],
     ['11-dining-decoration.jpeg', 'Dining table decoration'],
     ['12-graduation-portrait.jpeg', 'Graduation portrait'],
+    ['13-graduation-photography.jpg', 'Graduation photography at Escape Villa'],
+    ['14-makeup-glam.jpg', 'Glam makeup and beauty styling at Escape Villa'],
+    ['15-romantic-private-dinner.jpg', 'Couple enjoying a romantic private dinner at Escape Villa'],
   ];
   app!.innerHTML = page('Gallery', 'A selection of Escape Villa photography and event work.', `<div class="gallery">${photos.map(([photo, description]) => `<img alt="${description}" loading="lazy" src="/images/gallery/${photo}">`).join('')}</div>`);
 }
@@ -102,7 +111,7 @@ function renderBooking(): void {
   const packageOptions = initialPackages
     .map((pkg) => `<option value="${pkg.id}" ${pkg.id === defaultPackage?.id ? 'selected' : ''}>${escapeHtml(pkg.name)} — ${escapeHtml(packagePriceLabel(pkg))}</option>`)
     .join('');
-  app!.innerHTML = page('Book a service', 'Choose a service package, upload proof of payment, and submit your booking request. The team will confirm availability and any separately quoted costs.', `<div class="two-col"><aside class="callout"><img id="booking-service-image" class="booking-service-image" src="${bookingImage}" alt="${escapeHtml(bookingImageAlt)}"><h2 class="serif">Your selected package</h2><div id="package-selection">${selectedPackageMarkup(defaultPackage)}</div><p>Maximum capacity is 45 people. Prices shown are proposed; your request is not confirmed until the team reviews it and contacts you.</p><p>Venue hire, catering, décor rentals and supplier costs are quoted separately unless explicitly included in the agreed package.</p></aside><form data-form="booking" class="form"><label>Choose a service<select name="service_id" required>${serviceOptions}</select></label><label>Choose a package<select name="package_id" required>${packageOptions}</select></label><label>Event type<input name="event_type"></label><label>Event date<input name="event_date" type="date" min="${new Date().toISOString().slice(0, 10)}" required></label><label>Preferred start time<input name="start_time" type="time" required></label><label>Requested booking duration in minutes<input name="duration_minutes" type="number" min="30" value="${defaultPackage?.duration_minutes || 60}"></label><p class="muted">Location: Escape Villa, 38 Voortrekker Street, Polokwane Central.</p><label>Expected guests (maximum 45)<input name="guests" type="number" min="1" max="45"></label><label>Special requests<textarea name="details"></textarea></label><section class="callout banking-details"><h2 class="serif">Escape Villa — Banking details</h2><p><strong>Account holder:</strong> Escape Villa<br><strong>Bank name:</strong> FNB<br><strong>Account number:</strong> 658633093<br><strong>Account type:</strong> Business Account<br><strong>Branch code:</strong> 8475<br><strong>Reference:</strong> Customer Name</p></section><label>Proof of payment (JPG, PNG, WebP or PDF; max 3 MB)<input name="payment_proof" type="file" accept="image/jpeg,image/png,image/webp,application/pdf" required></label><p class="muted">Use the customer name as your payment reference, then upload your proof of payment.</p><button class="button">Submit service booking</button></form></div>`);
+  app!.innerHTML = page('Book a service', 'Choose a service package, upload proof of payment, and submit your booking request. The team will confirm availability and any separately quoted costs.', `<div class="two-col"><aside class="callout"><div id="booking-service-media">${initialService ? serviceMediaMarkup(initialService, true) : `<img class="booking-service-image" src="${bookingImage}" alt="${escapeHtml(bookingImageAlt)}">`}</div><h2 class="serif">Your selected package</h2><div id="package-selection">${selectedPackageMarkup(defaultPackage)}</div><p>Maximum capacity is 45 people. Prices shown are proposed; your request is not confirmed until the team reviews it and contacts you.</p><p>Venue hire, catering, décor rentals and supplier costs are quoted separately unless explicitly included in the agreed package.</p></aside><form data-form="booking" class="form"><label>Choose a service<select name="service_id" required>${serviceOptions}</select></label><label>Choose a package<select name="package_id" required>${packageOptions}</select></label><label>Event type<input name="event_type"></label><label>Event date<input name="event_date" type="date" min="${new Date().toISOString().slice(0, 10)}" required></label><label>Preferred start time<input name="start_time" type="time" required></label><label>Requested booking duration in minutes<input name="duration_minutes" type="number" min="30" value="${defaultPackage?.duration_minutes || 60}"></label><p class="muted">Location: Escape Villa, 38 Voortrekker Street, Polokwane Central.</p><label>Expected guests (maximum 45)<input name="guests" type="number" min="1" max="45"></label><label>Special requests<textarea name="details"></textarea></label><section class="callout banking-details"><h2 class="serif">Escape Villa — Banking details</h2><p><strong>Account holder:</strong> Escape Villa<br><strong>Bank name:</strong> FNB<br><strong>Account number:</strong> 658633093<br><strong>Account type:</strong> Business Account<br><strong>Branch code:</strong> 8475<br><strong>Reference:</strong> Customer Name</p></section><label>Proof of payment (JPG, PNG, WebP or PDF; max 3 MB)<input name="payment_proof" type="file" accept="image/jpeg,image/png,image/webp,application/pdf" required></label><p class="muted">Use the customer name as your payment reference, then upload your proof of payment.</p><button class="button">Submit service booking</button></form></div>`);
 }
 async function renderPortal(): Promise<void> {
   if (!currentUser) { location.assign('/login'); return; }
@@ -183,8 +192,8 @@ function bind(): void {
   servicePicker?.addEventListener('change', () => {
     const serviceId = Number(servicePicker.value);
     const selectedService = services.find((service) => service.id === serviceId);
-    const image = document.querySelector<HTMLImageElement>('#booking-service-image');
-    if (selectedService && image) { const [src, alt] = serviceImage(selectedService); image.src = src; image.alt = alt; }
+    const media = document.querySelector<HTMLElement>('#booking-service-media');
+    if (selectedService && media) media.innerHTML = serviceMediaMarkup(selectedService, true);
     const servicePackages = packages.filter((pkg) => pkg.service_id === serviceId);
     if (packagePicker) {
       packagePicker.innerHTML = servicePackages.map((pkg) => `<option value="${pkg.id}">${escapeHtml(pkg.name)} — ${escapeHtml(packagePriceLabel(pkg))}</option>`).join('');
