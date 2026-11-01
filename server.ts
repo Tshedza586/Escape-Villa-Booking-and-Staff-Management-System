@@ -668,6 +668,8 @@ async function handleApi(
     const booking = await database.prepare("SELECT id,customer_id,event_date,start_time,duration_minutes,status FROM bookings WHERE id=? AND customer_id=?").get(bookingId, user.id) as any;
     if (!booking) return (json(res, { error: "Booking not found." }, 404), true);
     if (["Completed", "Cancelled", "Declined"].includes(booking.status)) return (json(res, { error: "This booking can no longer be rescheduled." }, 409), true);
+    if (await database.prepare("SELECT id FROM cancellation_requests WHERE booking_id=? AND status='Pending' LIMIT 1").get(bookingId)) return (json(res, { error: "This booking has a cancellation request awaiting review." }, 409), true);
+    if (Number(time.slice(0,2)) * 60 + Number(time.slice(3)) + Number(booking.duration_minutes) > 1440) return (json(res, { error: "The booking duration cannot run past midnight." }, 400), true);
     if (await database.prepare("SELECT id FROM changes WHERE booking_id=? LIMIT 1").get(bookingId)) return (json(res, { error: "Only one rescheduling request is allowed for each booking." }, 409), true);
     if (await bookingTimeCollision(database, date, time, Number(booking.duration_minutes), bookingId)) return (json(res, { error: "That requested time overlaps another booking." }, 409), true);
     let result: any;
@@ -815,13 +817,14 @@ async function handleApi(
     const body = await readJson(req);
     const requestId = Number(body.request_id);
     const decision = String(body.decision || "");
-    const cancellation = await database.prepare("SELECT cr.*,b.status AS booking_status,b.event_date,COALESCE(p.amount,0) AS amount_paid,p.status AS payment_status FROM cancellation_requests cr JOIN bookings b ON b.id=cr.booking_id LEFT JOIN payments p ON p.booking_id=b.id WHERE cr.id=?").get(requestId) as any;
+    const cancellation = await database.prepare("SELECT cr.*,b.reference,b.status AS booking_status,b.event_date,COALESCE(p.amount,0) AS amount_paid,p.status AS payment_status FROM cancellation_requests cr JOIN bookings b ON b.id=cr.booking_id LEFT JOIN payments p ON p.booking_id=b.id WHERE cr.id=?").get(requestId) as any;
     if (!cancellation) return (json(res, { error: "Cancellation request not found." }, 404), true);
     if (cancellation.status !== "Pending") return (json(res, { error: "This cancellation request has already been reviewed." }, 409), true);
     if (decision === "reject") {
       const reason = String(body.reason || "").trim().slice(0, 500);
       if (!reason) return (json(res, { error: "Enter a reason when rejecting a cancellation request." }, 400), true);
-      await database.prepare("UPDATE cancellation_requests SET status='Rejected',rejection_reason=?,reviewed_by=?,reviewed_at=? WHERE id=? AND status='Pending'").run(reason, admin.id, now(), requestId);
+      const rejection = await database.prepare("UPDATE cancellation_requests SET status='Rejected',rejection_reason=?,reviewed_by=?,reviewed_at=? WHERE id=? AND status='Pending'").run(reason, admin.id, now(), requestId);
+      if (Number(rejection.rowsAffected) !== 1) return (json(res, { error: "This cancellation request has already been reviewed." }, 409), true);
       await notify(cancellation.customer_id, `Your cancellation request for ${cancellation.reference} was rejected: ${reason}`);
       await logActivity(admin, "Rejected cancellation request", "Cancellation", String(requestId), reason);
       return (json(res, { ok: true }), true);
@@ -837,20 +840,26 @@ async function handleApi(
     let releasedStaff: number[] = [];
     try {
       await database.transaction(async (tx: any) => {
-        const fresh = await tx.prepare("SELECT status FROM cancellation_requests WHERE id=?").get(requestId) as {status:string};
+        const fresh = await tx.prepare("SELECT cr.status,b.status AS booking_status,COALESCE(p.amount,0) AS amount_paid,b.event_date FROM cancellation_requests cr JOIN bookings b ON b.id=cr.booking_id LEFT JOIN payments p ON p.booking_id=b.id WHERE cr.id=?").get(requestId) as any;
         if (!fresh || fresh.status !== "Pending") throw new Error("REQUEST_ALREADY_REVIEWED");
+        if (["Completed", "Cancelled", "Declined"].includes(fresh.booking_status)) throw new Error("BOOKING_NO_LONGER_CANCELLABLE");
+        if (refundAmount > Number(fresh.amount_paid || 0)) throw new Error("REFUND_EXCEEDS_PAID");
+        const currentEstimate = refundForBooking(Number(fresh.amount_paid || 0), fresh.event_date, policy, cancellation.request_type === "venue");
         const taskRows = await tx.prepare("SELECT DISTINCT st.user_id FROM tasks t JOIN staff st ON st.id=t.staff_id WHERE t.booking_id=? AND t.status<>'Completed'").all(cancellation.booking_id) as Array<{user_id:number}>;
         releasedStaff = taskRows.map((row) => row.user_id);
         await tx.prepare("UPDATE cancellation_requests SET status='Approved',calculated_refund_amount=?,approved_refund_amount=?,reviewed_by=?,reviewed_at=? WHERE id=?")
-          .run(calculated, Math.round(refundAmount * 100) / 100, admin.id, now(), requestId);
+          .run(currentEstimate, Math.round(refundAmount * 100) / 100, admin.id, now(), requestId);
         await tx.prepare("UPDATE bookings SET status='Cancelled' WHERE id=?").run(cancellation.booking_id);
         await tx.prepare("UPDATE tasks SET staff_id=NULL,status='Cancelled' WHERE booking_id=? AND status<>'Completed'").run(cancellation.booking_id);
+        await tx.prepare("UPDATE changes SET status='Rejected',response='Booking cancelled before rescheduling review.' WHERE booking_id=? AND status='Pending'").run(cancellation.booking_id);
         if (refundAmount > 0) await tx.prepare("INSERT INTO refunds(booking_id,cancellation_request_id,amount,status,updated_by,created_at,updated_at) VALUES(?,?,?,'Pending',?,?,?)")
           .run(cancellation.booking_id, requestId, Math.round(refundAmount * 100) / 100, admin.id, now(), now());
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : "";
       if (message === "REQUEST_ALREADY_REVIEWED") return (json(res, { error: "This cancellation request has already been reviewed." }, 409), true);
+      if (message === "BOOKING_NO_LONGER_CANCELLABLE") return (json(res, { error: "This booking can no longer be cancelled." }, 409), true);
+      if (message === "REFUND_EXCEEDS_PAID") return (json(res, { error: "Refund cannot exceed the current verified amount actually paid." }, 409), true);
       if (/UNIQUE constraint failed/i.test(message)) return (json(res, { error: "A refund record already exists for this booking." }, 409), true);
       throw error;
     }
@@ -874,25 +883,32 @@ async function handleApi(
     const amountPaid = Math.round(Number(booking.amount_paid || 0) * 100) / 100;
     try {
       await database.transaction(async (tx: any) => {
+        const freshBooking = await tx.prepare("SELECT b.customer_id,b.status,COALESCE(p.amount,0) AS amount_paid FROM bookings b LEFT JOIN payments p ON p.booking_id=b.id WHERE b.id=?").get(bookingId) as any;
+        if (!freshBooking || ["Completed", "Cancelled", "Declined"].includes(freshBooking.status)) throw new Error("BOOKING_NO_LONGER_CANCELLABLE");
+        const currentAmountPaid = Math.round(Number(freshBooking.amount_paid || 0) * 100) / 100;
         const pending = await tx.prepare("SELECT id FROM cancellation_requests WHERE booking_id=? AND status='Pending'").get(bookingId) as {id:number} | undefined;
         if (pending) {
           requestId = pending.id;
           await tx.prepare("UPDATE cancellation_requests SET request_type='venue',reason=?,status='Approved',calculated_refund_amount=?,approved_refund_amount=?,reviewed_by=?,reviewed_at=? WHERE id=?")
-            .run(reason, amountPaid, amountPaid, admin.id, now(), requestId);
+            .run(reason, currentAmountPaid, currentAmountPaid, admin.id, now(), requestId);
         } else {
           const result = await tx.prepare("INSERT INTO cancellation_requests(booking_id,customer_id,request_type,status,reason,calculated_refund_amount,approved_refund_amount,reviewed_by,requested_at,reviewed_at) VALUES(?,?,'venue','Approved',?,?,?,?,?,?)")
-            .run(bookingId, booking.customer_id, reason, amountPaid, amountPaid, admin.id, now(), now());
+            .run(bookingId, freshBooking.customer_id, reason, currentAmountPaid, currentAmountPaid, admin.id, now(), now());
           requestId = Number(result.lastInsertRowid);
         }
         const staff = await tx.prepare("SELECT DISTINCT st.user_id FROM tasks t JOIN staff st ON st.id=t.staff_id WHERE t.booking_id=? AND t.status<>'Completed'").all(bookingId) as Array<{user_id:number}>;
         releasedStaff = staff.map((row) => row.user_id);
         await tx.prepare("UPDATE bookings SET status='Cancelled' WHERE id=?").run(bookingId);
         await tx.prepare("UPDATE tasks SET staff_id=NULL,status='Cancelled' WHERE booking_id=? AND status<>'Completed'").run(bookingId);
-        if (amountPaid > 0) await tx.prepare("INSERT INTO refunds(booking_id,cancellation_request_id,amount,status,updated_by,created_at,updated_at) VALUES(?,?,?,'Pending',?,?,?)")
-          .run(bookingId, requestId, amountPaid, admin.id, now(), now());
+        await tx.prepare("UPDATE changes SET status='Rejected',response='Booking cancelled before rescheduling review.' WHERE booking_id=? AND status='Pending'").run(bookingId);
+        if (currentAmountPaid > 0) await tx.prepare("INSERT INTO refunds(booking_id,cancellation_request_id,amount,status,updated_by,created_at,updated_at) VALUES(?,?,?,'Pending',?,?,?)")
+          .run(bookingId, requestId, currentAmountPaid, admin.id, now(), now());
+        booking.customer_id = freshBooking.customer_id;
+        booking.amount_paid = currentAmountPaid;
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : "";
+      if (message === "BOOKING_NO_LONGER_CANCELLABLE") return (json(res, { error: "This booking can no longer be cancelled." }, 409), true);
       if (/UNIQUE constraint failed/i.test(message)) return (json(res, { error: "A cancellation or refund record already exists for this booking." }, 409), true);
       throw error;
     }
@@ -916,8 +932,23 @@ async function handleApi(
     const failureReason = String(body.failure_reason || "").trim().slice(0, 500);
     if (status === "Processed" && (body.money_sent !== true || !transferReference)) return (json(res, { error: "Only mark Processed after sending the money outside this website; enter the bank transfer reference." }, 400), true);
     if (status === "Failed" && !failureReason) return (json(res, { error: "Enter a reason for the failed refund." }, 400), true);
-    await database.prepare("UPDATE refunds SET status=?,transfer_reference=?,failure_reason=?,updated_by=?,updated_at=?,processed_at=? WHERE id=?")
-      .run(status, status === "Processed" ? transferReference : null, status === "Failed" ? failureReason : null, admin.id, now(), status === "Processed" ? now() : null, refundId);
+    try {
+      await database.transaction(async (tx:any) => {
+        const fresh = await tx.prepare("SELECT r.status,r.amount,COALESCE(p.amount,0) AS amount_paid FROM refunds r LEFT JOIN payments p ON p.booking_id=r.booking_id WHERE r.id=?").get(refundId) as any;
+        if (!fresh) throw new Error("REFUND_NOT_FOUND");
+        if (fresh.status === "Processed") throw new Error("REFUND_ALREADY_PROCESSED");
+        if (Number(fresh.amount) <= 0 || Number(fresh.amount) > Number(fresh.amount_paid)) throw new Error("REFUND_AMOUNT_INVALID");
+        const updated = await tx.prepare("UPDATE refunds SET status=?,transfer_reference=?,failure_reason=?,updated_by=?,updated_at=?,processed_at=? WHERE id=? AND status<>'Processed'")
+          .run(status, status === "Processed" ? transferReference : null, status === "Failed" ? failureReason : null, admin.id, now(), status === "Processed" ? now() : null, refundId);
+        if (Number(updated.rowsAffected) !== 1) throw new Error("REFUND_ALREADY_PROCESSED");
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "";
+      if (message === "REFUND_NOT_FOUND") return (json(res, { error: "Refund record not found." }, 404), true);
+      if (message === "REFUND_ALREADY_PROCESSED") return (json(res, { error: "A processed refund is locked to prevent duplicate payment." }, 409), true);
+      if (message === "REFUND_AMOUNT_INVALID") return (json(res, { error: "Refund amount must be positive and no greater than the current verified amount paid." }, 409), true);
+      throw error;
+    }
     const notice = status === "Processed" ? `Your R${Number(refund.amount).toFixed(2)} refund for ${refund.reference} was marked Processed by Escape Villa. Transfer reference: ${transferReference}.` : status === "Failed" ? `Your refund for ${refund.reference} was marked Failed: ${failureReason}` : `Your refund for ${refund.reference} is Pending.`;
     await notify(refund.customer_id, notice);
     await logActivity(admin, `Updated refund status to ${status}`, "Refund", String(refundId), status === "Processed" ? `R${Number(refund.amount).toFixed(2)}; transfer reference ${transferReference}` : failureReason);
@@ -929,7 +960,7 @@ async function handleApi(
     const body = await readJson(req);
     const requestId = Number(body.request_id);
     const decision = String(body.decision || "");
-    const change = await database.prepare("SELECT ch.*,b.status AS booking_status,b.duration_minutes,b.reference,b.id AS booking_id FROM changes ch JOIN bookings b ON b.id=ch.booking_id WHERE ch.id=?").get(requestId) as any;
+    const change = await database.prepare("SELECT ch.*,b.status AS booking_status,b.duration_minutes,b.reference,b.id AS booking_id,(SELECT COUNT(*) FROM cancellation_requests cr WHERE cr.booking_id=b.id AND cr.status='Pending') AS pending_cancellations FROM changes ch JOIN bookings b ON b.id=ch.booking_id WHERE ch.id=?").get(requestId) as any;
     if (!change) return (json(res, { error: "Rescheduling request not found." }, 404), true);
     if (change.status !== "Pending") return (json(res, { error: "This rescheduling request has already been reviewed." }, 409), true);
     if (decision === "reject") {
@@ -942,10 +973,12 @@ async function handleApi(
     }
     if (decision !== "approve") return (json(res, { error: "Choose approve or reject." }, 400), true);
     if (["Completed", "Cancelled", "Declined"].includes(change.booking_status)) return (json(res, { error: "This booking can no longer be rescheduled." }, 409), true);
+    if (Number(change.pending_cancellations) > 0) return (json(res, { error: "Resolve the pending cancellation request before approving a reschedule." }, 409), true);
     let requested: {event_date:string;start_time:string};
     try { requested = JSON.parse(change.requested_json) as {event_date:string;start_time:string}; }
     catch { return (json(res, { error: "The requested date and time could not be read." }, 400), true); }
     if (!validISODate(requested.event_date) || requested.event_date < southAfricanDate() || !/^\d{2}:\d{2}$/.test(requested.start_time)) return (json(res, { error: "The requested time is no longer valid." }, 400), true);
+    if (Number(requested.start_time.slice(0,2)) * 60 + Number(requested.start_time.slice(3)) + Number(change.duration_minutes) > 1440) return (json(res, { error: "The booking duration cannot run past midnight." }, 400), true);
     if (await bookingTimeCollision(database, requested.event_date, requested.start_time, Number(change.duration_minutes), change.booking_id)) return (json(res, { error: "That time is no longer available because it overlaps another booking." }, 409), true);
     let assignedStaffUser: number | null = null;
     try {
@@ -1291,6 +1324,7 @@ const mime: Record<string, string> = {
   ".png": "image/png",
   ".jpg": "image/jpeg",
   ".webp": "image/webp",
+  ".mp4": "video/mp4",
 };
 createServer(async (req, res) => {
   try {

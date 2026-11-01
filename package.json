@@ -10,7 +10,8 @@
     "build": "tsc -p tsconfig.client.json && tsc -p tsconfig.server.json && node scripts/copy-static.mjs",
     "start": "npm run build && node dist/server.js",
     "setup:admin": "npm run build && node dist/scripts/setup-admin.js",
-    "check": "tsc -p tsconfig.client.json --noEmit && tsc -p tsconfig.server.json --noEmit"
+    "check": "tsc -p tsconfig.client.json --noEmit && tsc -p tsconfig.server.json --noEmit",
+    "test:booking-management": "npm run build && node scripts/test-booking-management.mjs"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
