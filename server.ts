@@ -556,8 +556,8 @@ async function handleApi(
     await logActivity(updated, "Updated administrator login details", "Account", String(user.id), changes);
     return (json(res, updated), true);
   }
-  if (method === "PATCH" && path === "/api/customer/profile") {
-    const user = await requireRole(req, res, ["customer"]);
+  if (method === "PATCH" && path === "/api/account/profile") {
+    const user = await requireRole(req, res, ["customer", "staff"]);
     if (!user) return true;
     const body = await readJson(req);
     const name = String(body.name || "").trim();
@@ -1245,6 +1245,11 @@ async function handleApi(
       ),
       true
     );
+  }
+  if (method === "GET" && path === "/api/admin/customer-records") {
+    if (!await requireRole(req, res, ["admin"])) return true;
+    const customers = await database.prepare("SELECT u.id,u.name,u.email,u.phone,u.created_at,COUNT(b.id) AS booking_count,MAX(b.event_date) AS last_booking_date FROM users u LEFT JOIN bookings b ON b.customer_id=u.id WHERE u.role='customer' GROUP BY u.id,u.name,u.email,u.phone,u.created_at ORDER BY lower(u.name),u.id").all();
+    return (json(res, customers), true);
   }
   const paymentProofMatch = path.match(/^\/api\/admin\/payment-proof\/(\d+)$/);
   if (method === "GET" && paymentProofMatch) {

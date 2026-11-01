@@ -77,6 +77,11 @@ async function run() {
 
   response = await call('/api/register', { method: 'POST', body: { name: 'Test Customer', email: 'customer@test.invalid', phone: '0720000000', password: 'CustomerPassword!234', confirm_password: 'CustomerPassword!234' } });
   await expectStatus(response, 200, 'register customer');
+  response = await call('/api/admin/customer-records', { cookie: adminCookie });
+  await expectStatus(response, 200, 'admin can access customer Records');
+  assert.ok(response.data.some((row) => row.email === 'customer@test.invalid' && row.phone === '0720000000' && row.booking_count === 0), 'customer records include safe contact and account summary fields');
+  response = await call('/api/admin/customer-records');
+  await expectStatus(response, 401, 'customer Records are unavailable without administrator sign-in');
   response = await call('/api/login', { method: 'POST', body: { email: 'customer@test.invalid', password: 'CustomerPassword!234' } });
   await expectStatus(response, 200, 'customer sign in');
   const customerCookie = response.cookie;
@@ -118,6 +123,8 @@ async function run() {
   response = await call('/api/staff/login', { method: 'POST', body: { email: 'staff@test.invalid', password: 'StaffPassword!234' } });
   await expectStatus(response, 200, 'staff sign in');
   const staffCookie = response.cookie;
+  response = await call('/api/admin/customer-records', { cookie: staffCookie });
+  await expectStatus(response, 403, 'staff cannot access administrator customer Records');
   response = await call('/api/staff/tasks', { cookie: staffCookie });
   await expectStatus(response, 200, 'staff sees assigned task');
   assert.ok(response.data.some((task) => task.booking_id === booking.id), 'booking task belongs to qualified staff before cancellation');
@@ -231,7 +238,7 @@ async function run() {
   assert.equal(customerData.data.bookings.find((item) => item.id === rescheduleBooking.id).event_date, futureDate(31), 'approved date is reflected in customer booking');
   assert.equal(customerData.data.reschedules.find((item) => item.reference === rescheduleBooking.reference).status, 'Approved', 'reschedule history is visible to customer');
 
-  console.log('PASS: setup, editable policy, customer registration/sign-in, staff qualification, booking/payment, permissions, 7+ day/3–6 day/0–2 day refund calculations, venue full refund, cancellation duplicate guard, admin approve/reject and rejection reason, customer cancellation/refund notices, staff release, refund amount validation, Pending/Failed/Processed status guards, duplicate processing guard, customer history, one-time rescheduling, and reschedule availability.');
+  console.log('PASS: setup, editable policy, role-protected customer Records, customer registration/sign-in, staff qualification, booking/payment, permissions, 7+ day/3–6 day/0–2 day refund calculations, venue full refund, cancellation duplicate guard, admin approve/reject and rejection reason, customer cancellation/refund notices, staff release, refund amount validation, Pending/Failed/Processed status guards, duplicate processing guard, customer history, one-time rescheduling, and reschedule availability.');
 }
 
 try {
